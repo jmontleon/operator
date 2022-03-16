@@ -38,7 +38,7 @@ import (
 
 	miniov2 "github.com/minio/operator/pkg/apis/minio.min.io/v2"
 
-	certificates "k8s.io/api/certificates/v1beta1"
+	certificates "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,11 +96,12 @@ func generateCryptoData(tenant *miniov2.Tenant, hostsTemplate string) ([]byte, [
 		dnsNames = append(tenant.Spec.CertConfig.DNSNames, hosts...)
 	}
 	dnsNames = append(dnsNames, tenant.MinIOBucketBaseWildcardDomain())
+	opCommonNoDomain := fmt.Sprintf("operator.%s.svc", miniov2.GetNSFromFile())
 
 	csrTemplate := x509.CertificateRequest{
 		Subject: pkix.Name{
-			CommonName:   tenant.Spec.CertConfig.CommonName,
-			Organization: tenant.Spec.CertConfig.OrganizationName,
+			CommonName:   fmt.Sprintf("system:node:%s", opCommonNoDomain),
+			Organization: []string{"system:nodes"},
 		},
 		SignatureAlgorithm: x509.ECDSAWithSHA512,
 		DNSNames:           dnsNames,
@@ -153,31 +154,37 @@ func (c *Controller) createCSR(ctx context.Context, tenant *miniov2.Tenant) erro
 // createCertificate is equivalent to kubectl create <csr-name> and kubectl approve csr <csr-name>
 func (c *Controller) createCertificate(ctx context.Context, labels map[string]string, name, namespace string, csrBytes []byte, owner metav1.Object) error {
 	encodedBytes := pem.EncodeToMemory(&pem.Block{Type: csrType, Bytes: csrBytes})
+	csrSignerName := certificates.KubeletServingSignerName
 
 	kubeCSR := &certificates.CertificateSigningRequest{
 		TypeMeta: v1.TypeMeta{
-			APIVersion: "certificates.k8s.io/v1beta1",
+			APIVersion: "certificates.k8s.io/v1",
 			Kind:       "CertificateSigningRequest",
 		},
 		ObjectMeta: v1.ObjectMeta{
 			Name:      name,
 			Labels:    labels,
 			Namespace: namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(owner, schema.GroupVersionKind{
-					Group:   miniov2.SchemeGroupVersion.Group,
-					Version: miniov2.SchemeGroupVersion.Version,
-					Kind:    miniov2.MinIOCRDResourceKind,
-				}),
-			},
 		},
 		Spec: certificates.CertificateSigningRequestSpec{
-			Request: encodedBytes,
-			Groups:  []string{"system:authenticated"},
+			SignerName: csrSignerName,
+			Request:    encodedBytes,
+			Groups:     []string{"system:authenticated", "system:nodes"},
 			Usages: []certificates.KeyUsage{
 				certificates.UsageDigitalSignature,
+				certificates.UsageKeyEncipherment,
 				certificates.UsageServerAuth,
-				certificates.UsageClientAuth,
+			},
+		},
+	}
+
+	kubeCSR.Status = certificates.CertificateSigningRequestStatus{
+		Conditions: []certificates.CertificateSigningRequestCondition{
+			{
+				Type:           certificates.CertificateApproved,
+				Reason:         "MinIOOperatorAutoApproval",
+				Message:        "Automatically approved by MinIO Operator",
+				LastUpdateTime: metav1.NewTime(time.Now()),
 			},
 		},
 	}
@@ -200,11 +207,12 @@ func (c *Controller) createCertificate(ctx context.Context, labels map[string]st
 				Reason:         "MinIOOperatorAutoApproval",
 				Message:        "Automatically approved by MinIO Operator",
 				LastUpdateTime: metav1.NewTime(time.Now()),
+				Status:         "True",
 			},
 		},
 	}
 
-	_, err = c.certClient.CertificateSigningRequests().UpdateApproval(ctx, ks, metav1.UpdateOptions{})
+	_, err = c.certClient.CertificateSigningRequests().UpdateApproval(ctx, name, ks, metav1.UpdateOptions{})
 	if err != nil {
 		return err
 	}

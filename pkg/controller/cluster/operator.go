@@ -56,8 +56,8 @@ func generateOperatorCryptoData() ([]byte, []byte, error) {
 
 	csrTemplate := x509.CertificateRequest{
 		Subject: pkix.Name{
-			CommonName:   opCommonNoDomain,
-			Organization: []string{"Acme Co"},
+			CommonName:   fmt.Sprintf("system:node:%s", opCommonNoDomain),
+			Organization: []string{"system:nodes"},
 		},
 		SignatureAlgorithm: x509.ECDSAWithSHA512,
 		DNSNames:           []string{"operator", opCommonNoDomain, opCommon},
